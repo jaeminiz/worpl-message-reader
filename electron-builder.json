@@ -1,0 +1,32 @@
+{
+  "appId": "kr.co.worpl.message-reader",
+  "productName": "WORPL Message Reader",
+  "asar": true,
+  "directories": {
+    "output": "dist"
+  },
+  "files": [
+    "src/**/*",
+    "package.json",
+    "node_modules/**/*"
+  ],
+  "extraMetadata": {
+    "main": "src/main.cjs"
+  },
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": [
+          "x64"
+        ]
+      }
+    ]
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true
+  }
+}

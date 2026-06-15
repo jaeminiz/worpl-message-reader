@@ -1,0 +1,19 @@
+# Dependencies and local build output
+node_modules/
+dist/
+build/
+*.log
+
+# Runtime profiles and generated workbooks
+.chrome-profile/
+*.xlsx
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+~$*

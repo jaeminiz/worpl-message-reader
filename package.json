@@ -1,0 +1,25 @@
+{
+  "name": "worpl-message-reader",
+  "version": "0.1.4",
+  "description": "WORPL 쪽지 오토클릭 Windows desktop application.",
+  "author": {
+    "name": "박재민",
+    "email": "jaemini@gmail.com"
+  },
+  "license": "UNLICENSED",
+  "private": false,
+  "main": "src/main.cjs",
+  "scripts": {
+    "dev": "electron src/main.cjs",
+    "test": "node test/run-tests.cjs",
+    "build": "electron-builder --config electron-builder.json"
+  },
+  "dependencies": {
+    "exceljs": "^4.4.0",
+    "playwright-core": "^1.60.0"
+  },
+  "devDependencies": {
+    "electron": "^42.4.0",
+    "electron-builder": "^26.15.2"
+  }
+}
