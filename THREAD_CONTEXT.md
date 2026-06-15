@@ -24,6 +24,8 @@
 - GitHub CLI(`gh`)는 현재 PC PATH에서 인식되지 않습니다.
 - GitHub 커넥터에는 새 저장소 생성 도구가 노출되어 있지 않습니다.
 - `https://github.com/jaeminiz/worpl-message-reader.git` 원격은 확인 시점에 존재하지 않습니다.
+- 로컬 Git 원격 `origin`은 `https://github.com/jaeminiz/worpl-message-reader.git`로 추가했습니다.
+- `git push -u origin main` 시도 결과, GitHub가 `Repository not found`를 반환했습니다.
 - GitHub 공개 저장소 연결을 계속하려면 아래 둘 중 하나가 필요합니다.
   1. GitHub에서 `jaeminiz/worpl-message-reader` 공개 저장소를 먼저 생성
   2. PC에 GitHub CLI 설치 및 로그인 후 `gh repo create jaeminiz/worpl-message-reader --public --source . --remote origin --push` 실행 가능 상태 만들기
@@ -31,9 +33,8 @@
 ## 다음 작업 후보
 
 1. GitHub 공개 저장소 생성
-2. 새 프로젝트에서 `git remote add origin https://github.com/jaeminiz/worpl-message-reader.git`
-3. `git push -u origin main`
-4. 필요 시 기존 `worpl-clone-platform`에서 `tools/worpl-message-reader` 제거 또는 archive 처리
+2. `git push -u origin main`
+3. 필요 시 기존 `worpl-clone-platform`에서 `tools/worpl-message-reader` 제거 또는 archive 처리
 
 ## 검증 명령
 
