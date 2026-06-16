@@ -21,27 +21,18 @@
 
 ## GitHub 진행 상태
 
-- GitHub CLI(`gh`)는 현재 PC PATH에서 인식되지 않습니다.
-- GitHub 커넥터에는 새 저장소 생성 도구가 노출되어 있지 않습니다.
-- `https://github.com/jaeminiz/worpl-message-reader.git` 원격은 확인 시점에 존재하지 않습니다.
-- 로컬 Git 원격 `origin`은 `https://github.com/jaeminiz/worpl-message-reader.git`로 추가했습니다.
-- `git push -u origin main` 시도 결과, GitHub가 `Repository not found`를 반환했습니다.
+- GitHub 공개 저장소 생성 완료: `https://github.com/jaeminiz/worpl-message-reader`
+- 로컬 Git 원격 `origin`: `https://github.com/jaeminiz/worpl-message-reader.git`
+- `git push -u origin main` 성공, 로컬 `main`은 `origin/main`을 추적합니다.
+- GitHub API 확인 결과, `jaeminiz/worpl-message-reader`는 `public` 저장소이고 기본 브랜치는 `main`입니다.
 - GitHub CLI는 `winget install --id GitHub.cli -e --source winget`으로 설치했습니다.
 - 설치 경로는 `C:\Program Files\GitHub CLI\gh.exe`입니다. 현재 PowerShell 세션 PATH에는 아직 반영되지 않아 전체 경로로 실행했습니다.
-- `gh auth status` 결과, 아직 GitHub CLI 로그인은 되어 있지 않습니다.
-- Codex 인앱 브라우저로 GitHub 새 저장소 생성 화면을 열었으나, GitHub 로그인 화면으로 이동했습니다.
-- `@chrome` 요청에 따라 Chrome 제어 도구를 검색했으나 현재 세션에는 명시적인 Chrome 플러그인이 노출되지 않았습니다.
-- Windows Computer Use로 Chrome 창 제어를 시도했으나 로컬 `@oai/sky` 패키지 export 오류로 초기화되지 않았습니다.
-- `gh auth login --hostname github.com --git-protocol https --web --clipboard --scopes repo`를 실행했지만 제한 시간 내 인증이 완료되지 않았고, 이후 `gh auth status`도 미로그인 상태였습니다.
-- GitHub 공개 저장소 연결을 계속하려면 아래 둘 중 하나가 필요합니다.
-  1. GitHub에서 `jaeminiz/worpl-message-reader` 공개 저장소를 먼저 생성
-  2. GitHub CLI 로그인 후 `gh repo create jaeminiz/worpl-message-reader --public --source . --remote origin --push` 실행 가능 상태 만들기
+- GitHub CLI 로그인은 완료하지 않았습니다. 이번 연결은 인앱 브라우저에서 저장소를 생성한 뒤 로컬 `git push`로 완료했습니다.
 
 ## 다음 작업 후보
 
-1. GitHub 공개 저장소 생성
-2. `git push -u origin main`
-3. 필요 시 기존 `worpl-clone-platform`에서 `tools/worpl-message-reader` 제거 또는 archive 처리
+1. 필요 시 기존 `worpl-clone-platform`에서 `tools/worpl-message-reader` 제거 또는 archive 처리
+2. GitHub 저장소 설명, 토픽, 릴리스 태그 등 공개 저장소 메타데이터 정리
 
 ## 검증 명령
 
