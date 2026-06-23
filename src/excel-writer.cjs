@@ -21,7 +21,7 @@ function sanitizeSheetName(value) {
 function buildSheetName(options = {}) {
   if (options.mode === "all-new") {
     const maxReads = Number.isFinite(Number(options.maxReads)) ? Number(options.maxReads) : 20;
-    return sanitizeSheetName(`신규${Math.min(Math.max(maxReads, 1), 100)}개`);
+    return sanitizeSheetName(`신규${Math.min(Math.max(maxReads, 1), 1000)}개`);
   }
 
   return sanitizeSheetName(options.keyword || "키워드");

@@ -4,6 +4,7 @@ const maxReads = document.querySelector("#maxReads");
 const openChromeButton = document.querySelector("#openChrome");
 const previewButton = document.querySelector("#preview");
 const runButton = document.querySelector("#run");
+const pauseButton = document.querySelector("#pause");
 const openOutputButton = document.querySelector("#openOutput");
 const chromeStatus = document.querySelector("#chromeStatus");
 const summary = document.querySelector("#summary");
@@ -12,6 +13,7 @@ const outputPath = document.querySelector("#outputPath");
 const appVersion = document.querySelector("#appVersion");
 
 let lastOutputPath = "";
+let isRunning = false;
 rows.dataset.count = "0";
 
 function getMode() {
@@ -31,6 +33,7 @@ function setBusy(isBusy) {
   openChromeButton.disabled = isBusy;
   previewButton.disabled = isBusy;
   runButton.disabled = isBusy || rows.dataset.count === "0";
+  pauseButton.disabled = !isRunning;
 }
 
 function showError(target, message) {
@@ -116,6 +119,8 @@ runButton.addEventListener("click", async () => {
   }
 
   setBusy(true);
+  isRunning = true;
+  pauseButton.disabled = false;
   try {
     const result = await window.worplReader.run(getOptions());
     lastOutputPath = result.outputPath;
@@ -128,7 +133,18 @@ runButton.addEventListener("click", async () => {
   } catch (error) {
     showError(summary, error.message || "읽음 처리 실행에 실패했습니다.");
   } finally {
+    isRunning = false;
     setBusy(false);
+  }
+});
+
+pauseButton.addEventListener("click", async () => {
+  pauseButton.disabled = true;
+  try {
+    await window.worplReader.pause();
+    showStatus(summary, "일시정지 요청됨. 현재 쪽지 처리가 끝나면 읽은 쪽지만 저장하고 멈춥니다.");
+  } catch (error) {
+    showError(summary, error.message || "일시정지 요청에 실패했습니다.");
   }
 });
 

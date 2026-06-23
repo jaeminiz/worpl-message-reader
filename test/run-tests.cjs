@@ -6,6 +6,14 @@ const ExcelJS = require("exceljs");
 const { filterMessages, parseInboxHtml } = require("../src/message-parser.cjs");
 const { completionMessage } = require("../src/app-messages.cjs");
 const { buildOutputFileName, buildSheetName, defaultOutputPath, writeMessagesWorkbook } = require("../src/excel-writer.cjs");
+const {
+  collectMessagesAcrossPages,
+  messageKey,
+  normalizeRunOptions,
+  sameMessage,
+  shouldWriteCheckpoint
+} = require("../src/run-state.cjs");
+const { WorplMessageAutomation } = require("../src/automation.cjs");
 
 async function testParserExtractsNewRows() {
   const html = `
@@ -214,6 +222,7 @@ async function testWorkbookRenumbersSavedRowsAndWritesRunSummary() {
 function testSheetAndFileNames() {
   assert.equal(buildSheetName({ mode: "keyword-new", keyword: "현보" }), "현보");
   assert.equal(buildSheetName({ mode: "all-new", maxReads: 20 }), "신규20개");
+  assert.equal(buildSheetName({ mode: "all-new", maxReads: 1000 }), "신규1000개");
   assert.equal(buildSheetName({ mode: "keyword-new", keyword: "A/B:C*D?E[F]" }), "A_B_C_D_E_F");
   assert.equal(buildOutputFileName(new Date(2026, 5, 12, 13, 58), "현보"), "260612_1358_WP쪽지_현보.xlsx");
   assert.ok(defaultOutputPath(new Date(2026, 5, 12, 13, 58), "신규20개").endsWith("260612_1358_WP쪽지_신규20개.xlsx"));
@@ -226,6 +235,631 @@ function testCompletionMessage() {
     completionMessage({ recordedCount: 15, expectedCount: 17, skippedCount: 2 }),
     "쪽지 읽기 15건 완료 - 최초 대상 17건 중 2건은 중복 또는 동시 읽음으로 목록에서 사라져 엑셀에는 15건만 기록했습니다."
   );
+  assert.equal(
+    completionMessage({ recordedCount: 7, expectedCount: 20, skippedCount: 13, paused: true }),
+    "쪽지 읽기 7건 기록 후 일시정지 - 최초 대상 20건 중 남은 13건은 처리하지 않았습니다."
+  );
+}
+
+function testCollectMessagesAcrossPagesKeepsSearchingPastEmptyFirstPage() {
+  const pages = [
+    {
+      messages: [],
+      candidateCount: 20,
+      newCandidateCount: 20,
+      unreadBadgeCount: 40,
+      url: "http://example.invalid/inbox?page=1"
+    },
+    {
+      messages: [
+        {
+          sequence: 1,
+          date: "2026/06/23",
+          author: "설계팀",
+          title: "납기 키워드 확인",
+          link: "http://example.invalid/101",
+          clickKey: "/101",
+          frameUrl: "http://example.invalid/inbox?page=2"
+        }
+      ],
+      candidateCount: 20,
+      newCandidateCount: 20,
+      unreadBadgeCount: 40,
+      url: "http://example.invalid/inbox?page=2"
+    }
+  ];
+
+  const result = collectMessagesAcrossPages(pages, { maxReads: 20 });
+
+  assert.equal(result.count, 1);
+  assert.equal(result.messages[0].sequence, 1);
+  assert.equal(result.messages[0].title, "납기 키워드 확인");
+  assert.equal(result.scannedPages, 2);
+  assert.equal(result.candidateCount, 40);
+  assert.equal(result.newCandidateCount, 40);
+}
+
+function testCollectMessagesAcrossPagesDeduplicatesAndLimits() {
+  const pages = [
+    {
+      messages: [
+        { sequence: 1, title: "A", link: "http://example.invalid/a" },
+        { sequence: 2, title: "B", link: "http://example.invalid/b" }
+      ]
+    },
+    {
+      messages: [
+        { sequence: 1, title: "A", link: "http://example.invalid/a" },
+        { sequence: 2, title: "C", link: "http://example.invalid/c" }
+      ]
+    }
+  ];
+
+  const result = collectMessagesAcrossPages(pages, { maxReads: 2 });
+
+  assert.deepEqual(
+    result.messages.map((message) => message.title),
+    ["A", "B"]
+  );
+}
+
+function testMessageIdentityUsesDataIdWhenTitleChanges() {
+  const original = {
+    title: "260623_현보_기광운_현대미포조선_HMD8425_45K LPGC_BNWAS_R 0_(목표 260707)",
+    link: "http://example.invalid/class.php?class=Message&action=link&data_id=20260623164832baff"
+  };
+  const refreshed = {
+    title: "260623 현보 기광운 현대미포조선 HMD8425 45K LPGC BNWAS R 0 (목표 260707)",
+    link: "http://example.invalid/?class=Message&action=link&data_id=20260623164832baff"
+  };
+
+  assert.equal(messageKey(original), "data_id:20260623164832baff");
+  assert.equal(sameMessage(original, refreshed), true);
+}
+
+function testNormalizeRunOptionsAllowsLargeRunsWithCheckpoints() {
+  assert.deepEqual(normalizeRunOptions({ maxReads: 1000 }), {
+    maxReads: 1000,
+    checkpointEvery: 20,
+    maxScanPages: 50
+  });
+  assert.equal(normalizeRunOptions({ maxReads: 5000 }).maxReads, 1000);
+  assert.equal(normalizeRunOptions({ checkpointEvery: 50 }).checkpointEvery, 50);
+  assert.equal(shouldWriteCheckpoint(20, 20), true);
+  assert.equal(shouldWriteCheckpoint(21, 20), false);
+}
+
+async function testKeywordPreviewAppliesWorplSearchBeforeScanning() {
+  class TestAutomation extends WorplMessageAutomation {
+    constructor() {
+      super({ profileDir: "unused" });
+      this.actions = [];
+    }
+
+    async getActivePage() {
+      return { id: "page" };
+    }
+
+    async ensureInboxPage() {
+      this.actions.push("ensure");
+    }
+
+    async applyKeywordSearch(_page, options) {
+      this.actions.push(`search:${options.keyword}`);
+      return { searched: true };
+    }
+
+    async previewCurrentPage() {
+      this.actions.push("scan");
+      return {
+        url: "http://example.invalid/?class=Message&action=inbox",
+        count: 1,
+        candidateCount: 1,
+        newCandidateCount: 1,
+        unreadBadgeCount: 1,
+        nextPage: null,
+        messages: [{ title: "부적합 키워드", link: "http://example.invalid/1" }]
+      };
+    }
+  }
+
+  const automation = new TestAutomation();
+  const result = await automation.preview({ mode: "keyword-new", keyword: "부적합", maxReads: 20 });
+
+  assert.deepEqual(automation.actions, ["ensure", "search:부적합", "scan"]);
+  assert.equal(result.count, 1);
+}
+
+async function testReadVisibleMessagesProcessesOneSearchPageAsBatch() {
+  const outputPath = path.join(os.tmpdir(), `worpl-message-reader-batch-${Date.now()}.xlsx`);
+
+  class TestAutomation extends WorplMessageAutomation {
+    constructor() {
+      super({ profileDir: "unused" });
+      this.previewCalls = 0;
+      this.clickedTitles = [];
+    }
+
+    async getActivePage() {
+      return {
+        url: () => "http://example.invalid/?class=Message&action=inbox",
+        isClosed: () => false
+      };
+    }
+
+    async ensureInboxPage() {}
+
+    async preview(options) {
+      this.previewCalls += 1;
+      return {
+        url: "http://example.invalid/?class=Message&action=inbox",
+        count: 2,
+        candidateCount: 2,
+        newCandidateCount: 2,
+        unreadBadgeCount: 2,
+        scannedPages: options.maxScanPages || 1,
+        messages: [
+          {
+            sequence: 1,
+            date: "09:46 am",
+            author: "설계팀",
+            title: "부적합 첫번째",
+            link: "http://example.invalid/1",
+            clickKey: "/1",
+            frameUrl: "http://example.invalid/?class=Message&action=inbox",
+            pageUrl: "http://example.invalid/?class=Message&action=inbox"
+          },
+          {
+            sequence: 2,
+            date: "09:45 am",
+            author: "설계팀",
+            title: "부적합 두번째",
+            link: "http://example.invalid/2",
+            clickKey: "/2",
+            frameUrl: "http://example.invalid/?class=Message&action=inbox",
+            pageUrl: "http://example.invalid/?class=Message&action=inbox"
+          }
+        ]
+      };
+    }
+
+    async clickMessage(_page, message) {
+      this.clickedTitles.push(message.title);
+    }
+  }
+
+  const automation = new TestAutomation();
+  const result = await automation.readVisibleMessages({
+    mode: "keyword-new",
+    keyword: "부적합",
+    maxReads: 2,
+    outputPath
+  });
+
+  assert.deepEqual(automation.clickedTitles, ["부적합 첫번째", "부적합 두번째"]);
+  assert.equal(automation.previewCalls, 1);
+  assert.equal(result.count, 2);
+
+  await fs.unlink(outputPath);
+}
+
+async function testReadVisibleMessagesUsesExistingPreviewWithoutRefreshing() {
+  const outputPath = path.join(os.tmpdir(), `worpl-message-reader-existing-preview-${Date.now()}.xlsx`);
+
+  class TestAutomation extends WorplMessageAutomation {
+    constructor() {
+      super({ profileDir: "unused" });
+      this.clickedTitles = [];
+      this.lastPreview = [
+        {
+          sequence: 1,
+          date: "01:54 pm",
+          author: "기영2팀",
+          title: "작요 검색 결과",
+          link: "http://example.invalid/?class=Message&action=link&data_id=1",
+          clickKey: "/?class=Message&action=link&data_id=1",
+          frameUrl: "http://example.invalid/?class=Message&action=inbox&search=작요",
+          pageUrl: "http://example.invalid/?class=Message&action=inbox&search=작요"
+        }
+      ];
+    }
+
+    async getActivePage() {
+      return {
+        url: () => "http://example.invalid/?class=Message&action=inbox&search=작요",
+        isClosed: () => false
+      };
+    }
+
+    async ensureInboxPage() {
+      throw new Error("미리보기 직후 읽음 처리는 받은쪽지함 새로고침을 먼저 하면 안 됩니다.");
+    }
+
+    async preview() {
+      throw new Error("미리보기 직후 읽음 처리는 키워드 재검색을 먼저 하면 안 됩니다.");
+    }
+
+    async clickMessage(_page, message) {
+      this.clickedTitles.push(message.title);
+    }
+  }
+
+  const automation = new TestAutomation();
+  const result = await automation.readVisibleMessages({
+    mode: "keyword-new",
+    keyword: "작요",
+    maxReads: 1,
+    outputPath
+  });
+
+  assert.deepEqual(automation.clickedTitles, ["작요 검색 결과"]);
+  assert.equal(result.count, 1);
+
+  await fs.unlink(outputPath);
+}
+
+async function testClickMessageDefersDomClickBeforeNavigation() {
+  const page = {
+    waitForLoadState: async () => {},
+    waitForTimeout: async () => {},
+    url: () => "http://example.invalid/?class=Message&action=inbox",
+    isClosed: () => false,
+    frames: () => [frame],
+    mainFrame: () => frame,
+    goBack: async () => {}
+  };
+  const frame = {
+    url: () => "http://example.invalid/?class=Message&action=inbox",
+    evaluate: async (fn) => {
+      if (!fn.toString().includes("setTimeout")) {
+        throw new Error("Execution context was destroyed, most likely because of a navigation");
+      }
+      return true;
+    }
+  };
+  const automation = new WorplMessageAutomation({ profileDir: "unused" });
+  automation.context = {
+    pages: () => [page]
+  };
+
+  await automation.clickMessage(page, {
+    title: "즉시 이동 쪽지",
+    link: "http://example.invalid/?class=Message&action=link&data_id=1",
+    clickKey: "/?class=Message&action=link&data_id=1",
+    frameUrl: "http://example.invalid/?class=Message&action=inbox",
+    pageUrl: "http://example.invalid/?class=Message&action=inbox"
+  });
+}
+
+async function testClickMessageTreatsContextDestroyedAfterNavigationAsClicked() {
+  let navigated = false;
+  const page = {
+    waitForLoadState: async () => {},
+    waitForTimeout: async () => {},
+    url: () =>
+      navigated
+        ? "http://example.invalid/?class=Project&action=view&data_id=1"
+        : "http://example.invalid/?class=Message&action=inbox&search=작요",
+    isClosed: () => false,
+    frames: () => [frame],
+    mainFrame: () => frame,
+    goBack: async () => {
+      navigated = false;
+    }
+  };
+  const frame = {
+    url: () => "http://example.invalid/?class=Message&action=inbox&search=작요",
+    evaluate: async () => {
+      navigated = true;
+      throw new Error("Execution context was destroyed, most likely because of a navigation");
+    }
+  };
+  const automation = new WorplMessageAutomation({ profileDir: "unused" });
+  automation.context = {
+    pages: () => [page]
+  };
+
+  await automation.clickMessage(page, {
+    title: "이동 중 컨텍스트 종료 쪽지",
+    link: "http://example.invalid/?class=Message&action=link&data_id=1",
+    clickKey: "/?class=Message&action=link&data_id=1",
+    frameUrl: "http://example.invalid/?class=Message&action=inbox&search=작요",
+    pageUrl: "http://example.invalid/?class=Message&action=inbox&search=작요"
+  });
+
+  assert.equal(page.url(), "http://example.invalid/?class=Message&action=inbox&search=작요");
+}
+
+async function testClickMessageReturnsToStoredPageUrlBeforeNextClick() {
+  let currentUrl = "http://example.invalid/?class=Project&action=view&data_id=first";
+  const clickedTitles = [];
+  const page = {
+    waitForLoadState: async () => {},
+    waitForTimeout: async () => {},
+    url: () => currentUrl,
+    isClosed: () => false,
+    goto: async (url) => {
+      currentUrl = url;
+    },
+    frames: () => [frame],
+    mainFrame: () => frame,
+    goBack: async () => {}
+  };
+  const frame = {
+    url: () => currentUrl,
+    evaluate: async (_fn, message) => {
+      if (currentUrl !== message.pageUrl) {
+        return false;
+      }
+      clickedTitles.push(message.title);
+      return true;
+    }
+  };
+  const automation = new WorplMessageAutomation({ profileDir: "unused" });
+  automation.context = {
+    pages: () => [page]
+  };
+
+  await automation.clickMessage(page, {
+    title: "두번째 쪽지",
+    link: "http://example.invalid/?class=Message&action=link&data_id=2",
+    clickKey: "/?class=Message&action=link&data_id=2",
+    frameUrl: "http://example.invalid/custom-search-result",
+    pageUrl: "http://example.invalid/custom-search-result"
+  });
+
+  assert.deepEqual(clickedTitles, ["두번째 쪽지"]);
+}
+
+async function testClickMessageDoesNotOpenExactMessageLinkWhenDomLinkMissing() {
+  let currentUrl = "http://example.invalid/?class=Project&action=view&data_id=first";
+  const navigatedUrls = [];
+  const page = {
+    waitForLoadState: async () => {},
+    waitForTimeout: async () => {},
+    url: () => currentUrl,
+    isClosed: () => false,
+    goto: async (url) => {
+      currentUrl = url;
+      navigatedUrls.push(url);
+    },
+    frames: () => [frame],
+    mainFrame: () => frame,
+    goBack: async () => {}
+  };
+  const frame = {
+    url: () => currentUrl,
+    evaluate: async () => false
+  };
+  const automation = new WorplMessageAutomation({ profileDir: "unused" });
+  automation.context = {
+    pages: () => [page]
+  };
+
+  await assert.rejects(
+    () =>
+      automation.clickMessage(page, {
+        title: "검색 결과에서 사라진 두번째 쪽지",
+        link: "http://example.invalid/?class=Message&action=link&data_id=exact-2",
+        clickKey: "/?class=Message&action=link&data_id=exact-2",
+        frameUrl: "http://example.invalid/?class=Message&action=inbox",
+        pageUrl: "http://example.invalid/?class=Message&action=inbox"
+      }),
+    /쪽지 링크를 찾을 수 없습니다/
+  );
+
+  assert.deepEqual(navigatedUrls, ["http://example.invalid/?class=Message&action=inbox"]);
+}
+
+async function testReadVisibleMessagesRefreshesSearchInsteadOfDirectLinkFallback() {
+  const outputPath = path.join(os.tmpdir(), `worpl-message-reader-refresh-retry-${Date.now()}.xlsx`);
+
+  class TestAutomation extends WorplMessageAutomation {
+    constructor() {
+      super({ profileDir: "unused" });
+      this.previewCalls = 0;
+      this.clickAttempts = 0;
+      this.clickedTitles = [];
+    }
+
+    async getActivePage() {
+      return {
+        url: () => "http://example.invalid/?class=Message&action=inbox",
+        isClosed: () => false
+      };
+    }
+
+    async ensureInboxPage() {}
+
+    async preview() {
+      this.previewCalls += 1;
+      return {
+        url: "http://example.invalid/?class=Message&action=inbox",
+        count: 1,
+        candidateCount: 1,
+        newCandidateCount: 1,
+        unreadBadgeCount: 1,
+        messages: [
+          {
+            sequence: 1,
+            date: "02:19 pm",
+            author: "영업1팀",
+            title: "작요 재검색 대상",
+            link: "http://example.invalid/?class=Message&action=link&data_id=retry-1",
+            clickKey: "/?class=Message&action=link&data_id=retry-1",
+            frameUrl: "http://example.invalid/?class=Message&action=inbox",
+            pageUrl: "http://example.invalid/?class=Message&action=inbox"
+          }
+        ]
+      };
+    }
+
+    async clickMessage(_page, message) {
+      this.clickAttempts += 1;
+      if (this.clickAttempts === 1) {
+        throw new Error(`쪽지 링크를 찾을 수 없습니다: ${message.title}`);
+      }
+      this.clickedTitles.push(message.title);
+    }
+  }
+
+  const automation = new TestAutomation();
+  const result = await automation.readVisibleMessages({
+    mode: "keyword-new",
+    keyword: "작요",
+    maxReads: 1,
+    outputPath
+  });
+
+  assert.equal(automation.previewCalls, 2);
+  assert.equal(automation.clickAttempts, 2);
+  assert.deepEqual(automation.clickedTitles, ["작요 재검색 대상"]);
+  assert.equal(result.count, 1);
+
+  await fs.unlink(outputPath);
+}
+
+async function testReadVisibleMessagesRetriesWhenTargetIsVisibleButNoLongerNew() {
+  const outputPath = path.join(os.tmpdir(), `worpl-message-reader-visible-candidate-${Date.now()}.xlsx`);
+
+  class TestAutomation extends WorplMessageAutomation {
+    constructor() {
+      super({ profileDir: "unused" });
+      this.previewCalls = 0;
+      this.clickAttempts = 0;
+      this.clickedTitles = [];
+    }
+
+    async getActivePage() {
+      return {
+        url: () => "http://example.invalid/?class=Message&action=inbox&search=작요",
+        isClosed: () => false
+      };
+    }
+
+    async ensureInboxPage() {}
+
+    async preview() {
+      this.previewCalls += 1;
+      const target = {
+        sequence: 1,
+        date: "02:13 pm",
+        author: "구매팀",
+        title: "작요 재검색 후 new 사라진 대상",
+        link: "http://example.invalid/?class=Message&action=link&data_id=visible-1",
+        clickKey: "/?class=Message&action=link&data_id=visible-1",
+        frameUrl: "http://example.invalid/?class=Message&action=inbox&search=작요",
+        pageUrl: "http://example.invalid/?class=Message&action=inbox&search=작요"
+      };
+
+      return {
+        url: "http://example.invalid/?class=Message&action=inbox&search=작요",
+        count: this.previewCalls === 1 ? 1 : 0,
+        candidateCount: 1,
+        newCandidateCount: this.previewCalls === 1 ? 1 : 0,
+        unreadBadgeCount: 1,
+        messages: this.previewCalls === 1 ? [target] : [],
+        candidates: [target]
+      };
+    }
+
+    async clickMessage(_page, message) {
+      this.clickAttempts += 1;
+      if (this.clickAttempts === 1) {
+        throw new Error(`쪽지 링크를 찾을 수 없습니다: ${message.title}`);
+      }
+      this.clickedTitles.push(message.title);
+    }
+  }
+
+  const automation = new TestAutomation();
+  const result = await automation.readVisibleMessages({
+    mode: "keyword-new",
+    keyword: "작요",
+    maxReads: 1,
+    outputPath
+  });
+
+  assert.equal(automation.previewCalls, 2);
+  assert.equal(automation.clickAttempts, 2);
+  assert.deepEqual(automation.clickedTitles, ["작요 재검색 후 new 사라진 대상"]);
+  assert.equal(result.count, 1);
+
+  await fs.unlink(outputPath);
+}
+
+async function testReadVisibleMessagesRetriesWhenTargetTitleFormattingChanges() {
+  const outputPath = path.join(os.tmpdir(), `worpl-message-reader-title-format-retry-${Date.now()}.xlsx`);
+
+  class TestAutomation extends WorplMessageAutomation {
+    constructor() {
+      super({ profileDir: "unused" });
+      this.previewCalls = 0;
+      this.clickAttempts = 0;
+      this.clickedTitles = [];
+    }
+
+    async getActivePage() {
+      return {
+        url: () => "http://example.invalid/?class=Message&action=inbox&search=",
+        isClosed: () => false
+      };
+    }
+
+    async ensureInboxPage() {}
+
+    async preview() {
+      this.previewCalls += 1;
+      const originalTarget = {
+        sequence: 1,
+        date: "04:48 pm",
+        author: "구매팀_출하박종민",
+        title: "260623_현보_기광운_현대미포조선_HMD8425_45K LPGC_BNWAS_R 0_(목표 260707)",
+        link: "http://example.invalid/class.php?class=Message&action=link&data_id=20260623164832baff",
+        clickKey: "/class.php?class=Message&action=link&data_id=20260623164832baff",
+        frameUrl: "http://example.invalid/?class=Message&action=inbox&search=",
+        pageUrl: "http://example.invalid/?class=Message&action=inbox&search="
+      };
+      const refreshedTarget = {
+        ...originalTarget,
+        title: "260623 현보 기광운 현대미포조선 HMD8425 45K LPGC BNWAS R 0 (목표 260707)",
+        link: "http://example.invalid/?class=Message&action=link&data_id=20260623164832baff",
+        clickKey: "/?class=Message&action=link&data_id=20260623164832baff"
+      };
+
+      return {
+        url: "http://example.invalid/?class=Message&action=inbox&search=",
+        count: this.previewCalls === 1 ? 1 : 0,
+        candidateCount: 1,
+        newCandidateCount: this.previewCalls === 1 ? 1 : 0,
+        unreadBadgeCount: 1,
+        messages: this.previewCalls === 1 ? [originalTarget] : [],
+        candidates: [this.previewCalls === 1 ? originalTarget : refreshedTarget]
+      };
+    }
+
+    async clickMessage(_page, message) {
+      this.clickAttempts += 1;
+      if (this.clickAttempts === 1) {
+        throw new Error(`쪽지 링크를 찾을 수 없습니다: ${message.title}`);
+      }
+      this.clickedTitles.push(message.title);
+    }
+  }
+
+  const automation = new TestAutomation();
+  const result = await automation.readVisibleMessages({
+    mode: "all-new",
+    maxReads: 1,
+    outputPath
+  });
+
+  assert.equal(automation.previewCalls, 2);
+  assert.equal(automation.clickAttempts, 2);
+  assert.deepEqual(automation.clickedTitles, ["260623 현보 기광운 현대미포조선 HMD8425 45K LPGC BNWAS R 0 (목표 260707)"]);
+  assert.equal(result.count, 1);
+
+  await fs.unlink(outputPath);
 }
 
 async function run() {
@@ -237,7 +871,21 @@ async function run() {
     ["writeMessagesWorkbook creates requested workbook", testWorkbookOutput],
     ["writeMessagesWorkbook renumbers rows and writes run summary", testWorkbookRenumbersSavedRowsAndWritesRunSummary],
     ["sheet and file names follow run options", testSheetAndFileNames],
-    ["completionMessage returns Korean completion text", testCompletionMessage]
+    ["completionMessage returns Korean completion text", testCompletionMessage],
+    ["collectMessagesAcrossPages keeps searching past empty first page", testCollectMessagesAcrossPagesKeepsSearchingPastEmptyFirstPage],
+    ["collectMessagesAcrossPages deduplicates and limits results", testCollectMessagesAcrossPagesDeduplicatesAndLimits],
+    ["message identity uses data_id when title changes", testMessageIdentityUsesDataIdWhenTitleChanges],
+    ["normalizeRunOptions allows large runs with checkpoints", testNormalizeRunOptionsAllowsLargeRunsWithCheckpoints],
+    ["keyword preview applies WORPL search before scanning", testKeywordPreviewAppliesWorplSearchBeforeScanning],
+    ["readVisibleMessages processes one search page as a batch", testReadVisibleMessagesProcessesOneSearchPageAsBatch],
+    ["readVisibleMessages uses existing preview without refreshing", testReadVisibleMessagesUsesExistingPreviewWithoutRefreshing],
+    ["clickMessage defers DOM click before navigation", testClickMessageDefersDomClickBeforeNavigation],
+    ["clickMessage treats context destroyed after navigation as clicked", testClickMessageTreatsContextDestroyedAfterNavigationAsClicked],
+    ["clickMessage returns to stored page URL before next click", testClickMessageReturnsToStoredPageUrlBeforeNextClick],
+    ["clickMessage does not open exact message link when DOM link is missing", testClickMessageDoesNotOpenExactMessageLinkWhenDomLinkMissing],
+    ["readVisibleMessages refreshes search instead of direct link fallback", testReadVisibleMessagesRefreshesSearchInsteadOfDirectLinkFallback],
+    ["readVisibleMessages retries when target is visible but no longer new", testReadVisibleMessagesRetriesWhenTargetIsVisibleButNoLongerNew],
+    ["readVisibleMessages retries when target title formatting changes", testReadVisibleMessagesRetriesWhenTargetTitleFormattingChanges]
   ];
 
   for (const [name, fn] of tests) {

@@ -4,6 +4,10 @@ function completionMessage(count) {
     const expectedCount = normalizeCount(count.expectedCount);
     const skippedCount = normalizeCount(count.skippedCount);
 
+    if (count.paused) {
+      return `쪽지 읽기 ${recordedCount}건 기록 후 일시정지 - 최초 대상 ${expectedCount}건 중 남은 ${skippedCount}건은 처리하지 않았습니다.`;
+    }
+
     if (skippedCount > 0 && expectedCount > recordedCount) {
       return `쪽지 읽기 ${recordedCount}건 완료 - 최초 대상 ${expectedCount}건 중 ${skippedCount}건은 중복 또는 동시 읽음으로 목록에서 사라져 엑셀에는 ${recordedCount}건만 기록했습니다.`;
     }
