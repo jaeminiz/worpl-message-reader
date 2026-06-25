@@ -133,6 +133,7 @@ runButton.addEventListener("click", async () => {
     openOutputButton.disabled = false;
     window.alert(message);
   } catch (error) {
+    renderRows([]);
     showError(summary, error.message || "읽음 처리 실행에 실패했습니다.");
   } finally {
     isRunning = false;

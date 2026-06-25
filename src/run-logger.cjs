@@ -31,7 +31,18 @@ function safeError(error) {
   };
 }
 
-async function writeRunErrorLog({ logPath, error, options = {}, runOptions = {}, readMessages = [], outputPath, expectedCount, pageUrl }) {
+async function writeRunErrorLog({
+  logPath,
+  error,
+  options = {},
+  runOptions = {},
+  readMessages = [],
+  skippedMessages = [],
+  failedMessage = null,
+  outputPath,
+  expectedCount,
+  pageUrl
+}) {
   await fs.mkdir(path.dirname(logPath), { recursive: true });
   const safe = safeError(error);
   const lines = [
@@ -50,11 +61,35 @@ async function writeRunErrorLog({ logPath, error, options = {}, runOptions = {},
     `navigationTimeoutMs: ${runOptions.navigationTimeoutMs || ""}`,
     `expectedCount: ${expectedCount || 0}`,
     `recordedCount: ${readMessages.length}`,
+    `skippedCount: ${skippedMessages.length}`,
+    "",
+    "Failed message:",
+    failedMessage
+      ? [
+          `Date=${failedMessage.date || ""}`,
+          `Author=${failedMessage.author || ""}`,
+          `Title=${failedMessage.title || ""}`,
+          `Link=${failedMessage.link || ""}`,
+          `DataKey=${failedMessage.link || failedMessage.clickKey || ""}`
+        ].join(" | ")
+      : "",
     "",
     "Recorded messages:",
     ...readMessages.map((message, index) =>
       [
         `#${index + 1}`,
+        `Date=${message.date || ""}`,
+        `Author=${message.author || ""}`,
+        `Title=${message.title || ""}`,
+        `Link=${message.link || ""}`
+      ].join(" | ")
+    ),
+    "",
+    "Skipped messages:",
+    ...skippedMessages.map((message, index) =>
+      [
+        `#${index + 1}`,
+        `Reason=${message.skipReason || ""}`,
         `Date=${message.date || ""}`,
         `Author=${message.author || ""}`,
         `Title=${message.title || ""}`,

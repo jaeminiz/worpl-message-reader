@@ -1,6 +1,6 @@
 {
   "name": "worpl-message-reader",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "description": "WORPL 쪽지 오토클릭 Windows desktop application.",
   "author": {
     "name": "박재민",

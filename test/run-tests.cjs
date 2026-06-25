@@ -866,6 +866,156 @@ async function testReadVisibleMessagesRetriesWhenTargetTitleFormattingChanges() 
   await fs.unlink(outputPath);
 }
 
+async function testReadVisibleMessagesSkipsDuplicateDataIdWithinBatch() {
+  const outputPath = path.join(os.tmpdir(), `worpl-message-reader-duplicate-skip-${Date.now()}.xlsx`);
+
+  class TestAutomation extends WorplMessageAutomation {
+    constructor() {
+      super({ profileDir: "unused" });
+      this.clickedLinks = [];
+    }
+
+    async getActivePage() {
+      return {
+        url: () => "http://example.invalid/?class=Message&action=inbox&search=작요",
+        isClosed: () => false
+      };
+    }
+
+    async ensureInboxPage() {}
+
+    async previewRunBatch() {
+      const duplicate = {
+        sequence: 1,
+        date: "09:17 am",
+        author: "품관팀",
+        title: "260615_작요_PMF_김진택_HOS_ORIENTAL AQUAMARINE_LIQUID SAMPLER 공급_R 0_(납기 260624)",
+        link: "http://example.invalid/?class=Message&action=link&data_id=duplicate-1"
+      };
+
+      return {
+        url: "http://example.invalid/?class=Message&action=inbox&search=작요",
+        count: 2,
+        candidateCount: 2,
+        newCandidateCount: 2,
+        unreadBadgeCount: 2,
+        messages: [duplicate, { ...duplicate, sequence: 2 }]
+      };
+    }
+
+    async clickMessageWithSearchRetry(_page, message) {
+      this.clickedLinks.push(message.link);
+      return message;
+    }
+  }
+
+  const automation = new TestAutomation();
+  const result = await automation.readVisibleMessages({
+    mode: "keyword-new",
+    keyword: "작요",
+    maxReads: 2,
+    outputPath
+  });
+
+  assert.equal(automation.clickedLinks.length, 1);
+  assert.equal(result.count, 1);
+  assert.equal(result.skippedCount, 1);
+
+  await fs.unlink(outputPath);
+}
+
+async function testReadVisibleMessagesSkipsDisappearedDataIdInsteadOfFailingRun() {
+  const outputPath = path.join(os.tmpdir(), `worpl-message-reader-disappeared-skip-${Date.now()}.xlsx`);
+
+  class TestAutomation extends WorplMessageAutomation {
+    constructor() {
+      super({ profileDir: "unused" });
+      this.previewCalls = 0;
+      this.clickAttempts = 0;
+      this.clickedTitles = [];
+    }
+
+    async getActivePage() {
+      return {
+        url: () => "http://example.invalid/?class=Message&action=inbox&search=작요",
+        isClosed: () => false
+      };
+    }
+
+    async ensureInboxPage() {}
+
+    async previewRunBatch() {
+      return {
+        url: "http://example.invalid/?class=Message&action=inbox&search=작요",
+        count: 2,
+        candidateCount: 2,
+        newCandidateCount: 2,
+        unreadBadgeCount: 2,
+        messages: [
+          {
+            sequence: 1,
+            date: "09:17 am",
+            author: "품관팀",
+            title: "이미 읽힌 뒤 사라질 대상",
+            link: "http://example.invalid/?class=Message&action=link&data_id=gone-1",
+            clickKey: "/?class=Message&action=link&data_id=gone-1"
+          },
+          {
+            sequence: 2,
+            date: "09:13 am",
+            author: "품관팀",
+            title: "정상 대상",
+            link: "http://example.invalid/?class=Message&action=link&data_id=ok-1",
+            clickKey: "/?class=Message&action=link&data_id=ok-1"
+          }
+        ]
+      };
+    }
+
+    async preview() {
+      this.previewCalls += 1;
+      return {
+        url: "http://example.invalid/?class=Message&action=inbox&search=작요",
+        count: 0,
+        candidateCount: 1,
+        newCandidateCount: 0,
+        unreadBadgeCount: 1,
+        messages: [],
+        candidates: [
+          {
+            sequence: 1,
+            title: "다른 쪽지",
+            link: "http://example.invalid/?class=Message&action=link&data_id=other-1"
+          }
+        ]
+      };
+    }
+
+    async clickMessage(_page, message) {
+      this.clickAttempts += 1;
+      if (message.link.includes("gone-1")) {
+        throw new Error(`쪽지 링크를 찾을 수 없습니다: ${message.title}`);
+      }
+      this.clickedTitles.push(message.title);
+    }
+  }
+
+  const automation = new TestAutomation();
+  const result = await automation.readVisibleMessages({
+    mode: "keyword-new",
+    keyword: "작요",
+    maxReads: 2,
+    outputPath
+  });
+
+  assert.equal(automation.previewCalls, 1);
+  assert.deepEqual(automation.clickedTitles, ["정상 대상"]);
+  assert.equal(result.count, 1);
+  assert.equal(result.skippedCount, 1);
+
+  await fs.unlink(outputPath);
+}
+
 async function testEnsureInboxPageUsesLongTimeoutForLargeInboxes() {
   const automation = new WorplMessageAutomation({ profileDir: "unused" });
   let capturedTimeout = 0;
@@ -1003,6 +1153,8 @@ async function run() {
     ["readVisibleMessages refreshes search instead of direct link fallback", testReadVisibleMessagesRefreshesSearchInsteadOfDirectLinkFallback],
     ["readVisibleMessages retries when target is visible but no longer new", testReadVisibleMessagesRetriesWhenTargetIsVisibleButNoLongerNew],
     ["readVisibleMessages retries when target title formatting changes", testReadVisibleMessagesRetriesWhenTargetTitleFormattingChanges],
+    ["readVisibleMessages skips duplicate data_id within batch", testReadVisibleMessagesSkipsDuplicateDataIdWithinBatch],
+    ["readVisibleMessages skips disappeared data_id instead of failing run", testReadVisibleMessagesSkipsDisappearedDataIdInsteadOfFailingRun],
     ["ensureInboxPage uses long timeout for large inboxes", testEnsureInboxPageUsesLongTimeoutForLargeInboxes],
     ["ensureInboxPage uses user configured timeout", testEnsureInboxPageUsesUserConfiguredTimeout],
     ["readVisibleMessages saves partial workbook and log on error", testReadVisibleMessagesSavesPartialWorkbookAndLogOnError]

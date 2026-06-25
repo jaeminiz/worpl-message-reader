@@ -383,6 +383,7 @@ class WorplMessageAutomation {
     const sheetName = buildSheetName({ mode: options.mode, keyword: options.keyword, maxReads });
     const outputPath = options.outputPath || defaultOutputPath(new Date(), sheetName);
     const processedKeys = new Set();
+    const skippedMessages = [];
     let expectedCount = 0;
 
     try {
@@ -421,9 +422,27 @@ class WorplMessageAutomation {
             break;
           }
 
-          await this.clickMessageWithSearchRetry(page, message, options, runOptions);
-          processedKeys.add(this.messageKey(message));
-          readMessages.push(message);
+          const key = this.messageKey(message);
+          if (processedKeys.has(key)) {
+            skippedMessages.push({
+              ...message,
+              skipReason: "이미 처리한 data_id가 같은 실행 목록에 다시 나타나 건너뛰었습니다."
+            });
+            continue;
+          }
+
+          const clickResult = await this.clickMessageWithSearchRetry(page, message, options, runOptions);
+          processedKeys.add(key);
+
+          if (clickResult?.skipped) {
+            skippedMessages.push({
+              ...message,
+              skipReason: clickResult.reason || "현재 검색 결과에서 사라져 건너뛰었습니다."
+            });
+            continue;
+          }
+
+          readMessages.push(clickResult || message);
 
           if (shouldWriteCheckpoint(readMessages.length, runOptions.checkpointEvery)) {
             await this.writeRunWorkbook(readMessages, outputPath, sheetName, {
@@ -436,7 +455,7 @@ class WorplMessageAutomation {
         currentPreview = null;
       }
 
-      return await this.finishRun(readMessages, outputPath, sheetName, expectedCount);
+      return await this.finishRun(readMessages, outputPath, sheetName, expectedCount, skippedMessages);
     } catch (error) {
       if (/읽음 처리할 신규 쪽지가 없습니다/.test(error.message || "")) {
         this.pauseRequested = false;
@@ -454,6 +473,8 @@ class WorplMessageAutomation {
         options,
         runOptions,
         readMessages,
+        skippedMessages,
+        failedMessage: error.failedMessage,
         outputPath: savedOutputPath,
         expectedCount,
         pageUrl: typeof page.url === "function" ? page.url() : ""
@@ -468,7 +489,7 @@ class WorplMessageAutomation {
     }
   }
 
-  async finishRun(readMessages, outputPath, sheetName, expectedCount) {
+  async finishRun(readMessages, outputPath, sheetName, expectedCount, skippedMessages = []) {
     const recordedMessages = readMessages.map((message, index) => ({ ...message, sequence: index + 1 }));
     const paused = this.pauseRequested;
     const skippedCount = Math.max(0, expectedCount - recordedMessages.length);
@@ -508,6 +529,7 @@ class WorplMessageAutomation {
       expectedCount,
       skippedCount,
       paused,
+      skippedMessages,
       completionMessage: completionMessage(messageStats),
       outputPath: savedOutputPath,
       messages: recordedMessages
@@ -596,7 +618,17 @@ class WorplMessageAutomation {
     );
 
     if (!refreshedMessage) {
-      throw new Error(`쪽지 링크를 현재 검색 결과에서 다시 확인할 수 없습니다: ${message.title}`);
+      if (this.hasStableMessageId(message)) {
+        return {
+          skipped: true,
+          message,
+          reason: "대상이 현재 검색 결과에서 사라졌습니다. 이미 읽혔거나 WORPL 목록이 갱신된 것으로 보고 건너뛰었습니다."
+        };
+      }
+
+      const missingError = new Error(`쪽지 링크를 현재 검색 결과에서 다시 확인할 수 없습니다: ${message.title}`);
+      missingError.failedMessage = message;
+      throw missingError;
     }
 
     await this.clickMessage(page, refreshedMessage, runOptions);
@@ -790,6 +822,10 @@ class WorplMessageAutomation {
 
   messageKey(message) {
     return messageKey(message);
+  }
+
+  hasStableMessageId(message) {
+    return /^data_id:/.test(this.messageKey(message));
   }
 }
 
