@@ -321,10 +321,14 @@ function testNormalizeRunOptionsAllowsLargeRunsWithCheckpoints() {
   assert.deepEqual(normalizeRunOptions({ maxReads: 1000 }), {
     maxReads: 1000,
     checkpointEvery: 20,
-    maxScanPages: 50
+    maxScanPages: 50,
+    navigationTimeoutSeconds: 500,
+    navigationTimeoutMs: 500000
   });
   assert.equal(normalizeRunOptions({ maxReads: 5000 }).maxReads, 1000);
   assert.equal(normalizeRunOptions({ checkpointEvery: 50 }).checkpointEvery, 50);
+  assert.equal(normalizeRunOptions({ navigationTimeoutSeconds: 300 }).navigationTimeoutMs, 300000);
+  assert.equal(normalizeRunOptions({ navigationTimeoutSeconds: 999 }).navigationTimeoutSeconds, 600);
   assert.equal(shouldWriteCheckpoint(20, 20), true);
   assert.equal(shouldWriteCheckpoint(21, 20), false);
 }
@@ -862,6 +866,119 @@ async function testReadVisibleMessagesRetriesWhenTargetTitleFormattingChanges() 
   await fs.unlink(outputPath);
 }
 
+async function testEnsureInboxPageUsesLongTimeoutForLargeInboxes() {
+  const automation = new WorplMessageAutomation({ profileDir: "unused" });
+  let capturedTimeout = 0;
+  const page = {
+    isClosed: () => false,
+    url: () => "http://example.invalid/?class=Project&action=view",
+    goto: async (_url, options) => {
+      capturedTimeout = options.timeout;
+    }
+  };
+
+  await automation.ensureInboxPage(page, "http://example.invalid/?class=Message&action=inbox");
+
+  assert.equal(capturedTimeout, 500000);
+}
+
+async function testEnsureInboxPageUsesUserConfiguredTimeout() {
+  const automation = new WorplMessageAutomation({ profileDir: "unused" });
+  let capturedTimeout = 0;
+  const page = {
+    isClosed: () => false,
+    url: () => "http://example.invalid/?class=Message&action=inbox",
+    goto: async (_url, options) => {
+      capturedTimeout = options.timeout;
+    }
+  };
+
+  await automation.ensureInboxPage(page, "http://example.invalid/?class=Message&action=inbox", {
+    navigationTimeoutSeconds: 300,
+    navigationTimeoutMs: 300000
+  });
+
+  assert.equal(capturedTimeout, 300000);
+}
+
+async function testReadVisibleMessagesSavesPartialWorkbookAndLogOnError() {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "worpl-message-reader-error-"));
+  const outputPath = path.join(runDir, "partial.xlsx");
+
+  class TestAutomation extends WorplMessageAutomation {
+    constructor() {
+      super({ profileDir: "unused" });
+      this.clickAttempts = 0;
+    }
+
+    async getActivePage() {
+      return {
+        url: () => "http://example.invalid/?class=Message&action=inbox",
+        isClosed: () => false
+      };
+    }
+
+    async previewRunBatch() {
+      return {
+        url: "http://example.invalid/?class=Message&action=inbox",
+        count: 2,
+        candidateCount: 2,
+        newCandidateCount: 2,
+        unreadBadgeCount: 2,
+        messages: [
+          {
+            sequence: 1,
+            date: "01:19 pm",
+            author: "재경팀_회계",
+            title: "260325_계산서_이민수_H3524",
+            link: "http://example.invalid/?class=Message&action=link&data_id=partial-1"
+          },
+          {
+            sequence: 2,
+            date: "01:20 pm",
+            author: "재경팀_회계",
+            title: "260325_계산서_오류대상",
+            link: "http://example.invalid/?class=Message&action=link&data_id=partial-2"
+          }
+        ]
+      };
+    }
+
+    async clickMessageWithSearchRetry(_page, message) {
+      this.clickAttempts += 1;
+      if (this.clickAttempts === 2) {
+        throw new Error(`page.goto: Timeout 10000ms exceeded: ${message.title}`);
+      }
+    }
+  }
+
+  const automation = new TestAutomation();
+  await assert.rejects(
+    () =>
+      automation.readVisibleMessages({
+        mode: "keyword-new",
+        keyword: "계산서",
+        maxReads: 2,
+        outputPath
+      }),
+    /오류 로그/
+  );
+
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.readFile(outputPath);
+  const sheet = workbook.getWorksheet("계산서");
+  assert.equal(sheet.rowCount, 2);
+  assert.equal(sheet.getRow(2).getCell(4).value, "260325_계산서_이민수_H3524");
+
+  const logs = await fs.readdir(path.join(runDir, "logs"));
+  assert.equal(logs.length, 1);
+  const logText = await fs.readFile(path.join(runDir, "logs", logs[0]), "utf8");
+  assert.match(logText, /page\.goto: Timeout 10000ms exceeded/);
+  assert.match(logText, /recordedCount: 1/);
+
+  await fs.rm(runDir, { recursive: true, force: true });
+}
+
 async function run() {
   const tests = [
     ["parseInboxHtml extracts only new message rows", testParserExtractsNewRows],
@@ -885,7 +1002,10 @@ async function run() {
     ["clickMessage does not open exact message link when DOM link is missing", testClickMessageDoesNotOpenExactMessageLinkWhenDomLinkMissing],
     ["readVisibleMessages refreshes search instead of direct link fallback", testReadVisibleMessagesRefreshesSearchInsteadOfDirectLinkFallback],
     ["readVisibleMessages retries when target is visible but no longer new", testReadVisibleMessagesRetriesWhenTargetIsVisibleButNoLongerNew],
-    ["readVisibleMessages retries when target title formatting changes", testReadVisibleMessagesRetriesWhenTargetTitleFormattingChanges]
+    ["readVisibleMessages retries when target title formatting changes", testReadVisibleMessagesRetriesWhenTargetTitleFormattingChanges],
+    ["ensureInboxPage uses long timeout for large inboxes", testEnsureInboxPageUsesLongTimeoutForLargeInboxes],
+    ["ensureInboxPage uses user configured timeout", testEnsureInboxPageUsesUserConfiguredTimeout],
+    ["readVisibleMessages saves partial workbook and log on error", testReadVisibleMessagesSavesPartialWorkbookAndLogOnError]
   ];
 
   for (const [name, fn] of tests) {

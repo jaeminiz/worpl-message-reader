@@ -1,6 +1,7 @@
 const startUrl = document.querySelector("#startUrl");
 const keyword = document.querySelector("#keyword");
 const maxReads = document.querySelector("#maxReads");
+const navigationTimeoutSeconds = document.querySelector("#navigationTimeoutSeconds");
 const openChromeButton = document.querySelector("#openChrome");
 const previewButton = document.querySelector("#preview");
 const runButton = document.querySelector("#run");
@@ -25,7 +26,8 @@ function getOptions() {
     mode: getMode(),
     keyword: keyword.value.trim(),
     inboxUrl: startUrl.value.trim(),
-    maxReads: Number(maxReads.value || "20")
+    maxReads: Number(maxReads.value || "20"),
+    navigationTimeoutSeconds: Number(navigationTimeoutSeconds.value || "500")
   };
 }
 
@@ -51,7 +53,7 @@ function renderRows(messages) {
   runButton.disabled = messages.length === 0;
 
   if (messages.length === 0) {
-    rows.innerHTML = '<tr><td colspan="5" class="empty">표시할 쪽지가 없습니다.</td></tr>';
+    rows.innerHTML = '<tr><td colspan="5" class="empty"><span class="empty-icon">⌕</span><span>표시할 쪽지가 없습니다.</span></td></tr>';
     return;
   }
 
@@ -80,7 +82,7 @@ function escapeHtml(value) {
 openChromeButton.addEventListener("click", async () => {
   setBusy(true);
   try {
-    const result = await window.worplReader.openChrome(startUrl.value.trim());
+    const result = await window.worplReader.openChrome(startUrl.value.trim(), getOptions());
     showStatus(chromeStatus, `Chrome 열림: ${result.url}`);
   } catch (error) {
     showError(chromeStatus, error.message || "Chrome을 열 수 없습니다.");
@@ -185,6 +187,10 @@ keyword.addEventListener("input", () => {
 
 maxReads.addEventListener("input", () => {
   showStatus(summary, "읽을 수량이 변경되었습니다. 실행 시 새 수량이 적용됩니다.");
+});
+
+navigationTimeoutSeconds.addEventListener("input", () => {
+  showStatus(summary, "페이지 이동 대기 시간이 변경되었습니다. 다음 작업부터 새 시간이 적용됩니다.");
 });
 
 window.worplReader

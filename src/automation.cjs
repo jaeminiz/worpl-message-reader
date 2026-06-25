@@ -3,7 +3,12 @@ const { chromium } = require("playwright-core");
 const { completionMessage } = require("./app-messages.cjs");
 const { DEFAULT_INBOX_URL, filterMessages } = require("./message-parser.cjs");
 const { buildSheetName, defaultOutputPath, writeMessagesWorkbook } = require("./excel-writer.cjs");
+const { buildRunLogPath, writeRunErrorLog } = require("./run-logger.cjs");
 const { collectMessagesAcrossPages, messageKey, normalizeRunOptions, sameMessage, shouldWriteCheckpoint } = require("./run-state.cjs");
+
+const NAVIGATION_TIMEOUT_MS = 500000;
+const LOAD_STATE_TIMEOUT_MS = 30000;
+const QUICK_LOAD_STATE_TIMEOUT_MS = 10000;
 
 class WorplMessageAutomation {
   constructor({ profileDir }) {
@@ -15,7 +20,7 @@ class WorplMessageAutomation {
     this.pauseRequested = false;
   }
 
-  async openChrome(startUrl = DEFAULT_INBOX_URL) {
+  async openChrome(startUrl = DEFAULT_INBOX_URL, options = {}) {
     if (this.context && !this.isContextUsable()) {
       this.context = null;
       this.lastPreview = [];
@@ -39,7 +44,8 @@ class WorplMessageAutomation {
 
     const page = await this.getActivePage();
     if (page.url() === "about:blank") {
-      await page.goto(startUrl, { waitUntil: "domcontentloaded" });
+      const runOptions = normalizeRunOptions(options);
+      await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: this.navigationTimeoutMs(runOptions) });
     }
 
     return { url: page.url() };
@@ -79,7 +85,7 @@ class WorplMessageAutomation {
   async preview(options = {}) {
     const page = await this.getActivePage();
     const runOptions = normalizeRunOptions(options);
-    await this.ensureInboxPage(page, options.inboxUrl || DEFAULT_INBOX_URL);
+    await this.ensureInboxPage(page, options.inboxUrl || DEFAULT_INBOX_URL, runOptions);
     await this.applyKeywordSearch(page, options);
     const pageResults = [];
     const visitedPages = new Set();
@@ -99,7 +105,7 @@ class WorplMessageAutomation {
       }
       visitedPages.add(nextPageKey);
 
-      const moved = await this.gotoNextInboxPage(page, currentPageResult.nextPage);
+      const moved = await this.gotoNextInboxPage(page, currentPageResult.nextPage, runOptions);
       if (!moved) {
         break;
       }
@@ -117,7 +123,7 @@ class WorplMessageAutomation {
   }
 
   async previewCurrentPage(page, options = {}) {
-    await page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => {});
+    await page.waitForLoadState("domcontentloaded", { timeout: LOAD_STATE_TIMEOUT_MS }).catch(() => {});
     const frameSnapshots = [];
 
     for (const frame of page.frames()) {
@@ -358,7 +364,7 @@ class WorplMessageAutomation {
         .catch((error) => ({ searched: false, reason: error.message }));
 
       if (result.searched) {
-        await page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => {});
+        await page.waitForLoadState("domcontentloaded", { timeout: LOAD_STATE_TIMEOUT_MS }).catch(() => {});
         await page.waitForTimeout(700);
         return result;
       }
@@ -373,60 +379,96 @@ class WorplMessageAutomation {
     const runOptions = normalizeRunOptions(options);
     this.pauseRequested = false;
     const maxReads = runOptions.maxReads;
-    const firstPreview = this.reusablePreview(options, maxReads) || (await this.previewRunBatch(options, runOptions, maxReads, true));
-
-    if (firstPreview.messages.length === 0) {
-      throw new Error("읽음 처리할 신규 쪽지가 없습니다. 먼저 미리보기를 확인하세요.");
-    }
-
     const readMessages = [];
-    const processedKeys = new Set();
-    let expectedCount = this.expectedReadCount(firstPreview, options, maxReads);
     const sheetName = buildSheetName({ mode: options.mode, keyword: options.keyword, maxReads });
     const outputPath = options.outputPath || defaultOutputPath(new Date(), sheetName);
-    let currentPreview = firstPreview;
+    const processedKeys = new Set();
+    let expectedCount = 0;
 
-    while (readMessages.length < maxReads) {
-      if (this.pauseRequested) {
-        break;
+    try {
+      const firstPreview = this.reusablePreview(options, maxReads) || (await this.previewRunBatch(options, runOptions, maxReads, true));
+
+      if (firstPreview.messages.length === 0) {
+        throw new Error("읽음 처리할 신규 쪽지가 없습니다. 먼저 미리보기를 확인하세요.");
       }
 
-      if (!currentPreview) {
-        await this.ensureInboxPage(page, inboxUrl);
-        currentPreview = await this.previewRunBatch(options, runOptions, maxReads - readMessages.length, false);
-        expectedCount = Math.max(expectedCount, Math.min(maxReads, readMessages.length + currentPreview.count));
-      }
+      expectedCount = this.expectedReadCount(firstPreview, options, maxReads);
+      let currentPreview = firstPreview;
 
-      if (currentPreview.unreadBadgeCount === 0) {
-        break;
-      }
-
-      const messages = currentPreview.messages.filter((candidate) => !processedKeys.has(this.messageKey(candidate)));
-
-      if (messages.length === 0) {
-        break;
-      }
-
-      for (const message of messages) {
-        if (this.pauseRequested || readMessages.length >= maxReads) {
+      while (readMessages.length < maxReads) {
+        if (this.pauseRequested) {
           break;
         }
 
-        await this.clickMessageWithSearchRetry(page, message, options, runOptions);
-        processedKeys.add(this.messageKey(message));
-        readMessages.push(message);
-
-        if (shouldWriteCheckpoint(readMessages.length, runOptions.checkpointEvery)) {
-          await this.writeRunWorkbook(readMessages, outputPath, sheetName, {
-            expectedCount,
-            paused: false
-          });
+        if (!currentPreview) {
+          await this.ensureInboxPage(page, inboxUrl, runOptions);
+          currentPreview = await this.previewRunBatch(options, runOptions, maxReads - readMessages.length, false);
+          expectedCount = Math.max(expectedCount, Math.min(maxReads, readMessages.length + currentPreview.count));
         }
+
+        if (currentPreview.unreadBadgeCount === 0) {
+          break;
+        }
+
+        const messages = currentPreview.messages.filter((candidate) => !processedKeys.has(this.messageKey(candidate)));
+
+        if (messages.length === 0) {
+          break;
+        }
+
+        for (const message of messages) {
+          if (this.pauseRequested || readMessages.length >= maxReads) {
+            break;
+          }
+
+          await this.clickMessageWithSearchRetry(page, message, options, runOptions);
+          processedKeys.add(this.messageKey(message));
+          readMessages.push(message);
+
+          if (shouldWriteCheckpoint(readMessages.length, runOptions.checkpointEvery)) {
+            await this.writeRunWorkbook(readMessages, outputPath, sheetName, {
+              expectedCount,
+              paused: false
+            });
+          }
+        }
+
+        currentPreview = null;
       }
 
-      currentPreview = null;
-    }
+      return await this.finishRun(readMessages, outputPath, sheetName, expectedCount);
+    } catch (error) {
+      if (/읽음 처리할 신규 쪽지가 없습니다/.test(error.message || "")) {
+        this.pauseRequested = false;
+        throw error;
+      }
 
+      const savedOutputPath = await this.writeRunWorkbook(readMessages, outputPath, sheetName, {
+        expectedCount,
+        paused: false,
+        reason: `오류가 발생하여 중단했습니다. 실제로 읽은 ${readMessages.length}건만 기록했습니다.`
+      });
+      const logPath = await writeRunErrorLog({
+        logPath: buildRunLogPath(outputPath),
+        error,
+        options,
+        runOptions,
+        readMessages,
+        outputPath: savedOutputPath,
+        expectedCount,
+        pageUrl: typeof page.url === "function" ? page.url() : ""
+      });
+      this.lastPreview = [];
+      this.lastPreviewResult = null;
+      this.lastPreviewOptions = null;
+      this.pauseRequested = false;
+      throw new Error(
+        `읽음 처리 중 오류가 발생했습니다. 실제로 읽은 ${readMessages.length}건은 엑셀에 저장했습니다: ${savedOutputPath}. 오류 로그: ${logPath}. 원인: ${error.message}`
+      );
+    }
+  }
+
+  async finishRun(readMessages, outputPath, sheetName, expectedCount) {
     const recordedMessages = readMessages.map((message, index) => ({ ...message, sequence: index + 1 }));
     const paused = this.pauseRequested;
     const skippedCount = Math.max(0, expectedCount - recordedMessages.length);
@@ -527,16 +569,16 @@ class WorplMessageAutomation {
         expectedCount: options.expectedCount || recordedMessages.length,
         recordedCount: recordedMessages.length,
         skippedCount,
-        reason: options.paused
+        reason: options.reason || (options.paused
           ? "사용자가 일시정지하여 실제로 읽은 쪽지만 기록했습니다."
-          : "중간 저장 파일입니다. 실행이 끝나면 최종 결과로 다시 저장됩니다."
+          : "중간 저장 파일입니다. 실행이 끝나면 최종 결과로 다시 저장됩니다.")
       }
     });
   }
 
   async clickMessageWithSearchRetry(page, message, options, runOptions) {
     try {
-      await this.clickMessage(page, message);
+      await this.clickMessage(page, message, runOptions);
       return message;
     } catch (error) {
       if (!/쪽지 링크를 찾을 수 없습니다/.test(error.message || "")) {
@@ -557,7 +599,7 @@ class WorplMessageAutomation {
       throw new Error(`쪽지 링크를 현재 검색 결과에서 다시 확인할 수 없습니다: ${message.title}`);
     }
 
-    await this.clickMessage(page, refreshedMessage);
+    await this.clickMessage(page, refreshedMessage, runOptions);
     return refreshedMessage;
   }
 
@@ -572,8 +614,9 @@ class WorplMessageAutomation {
 
   async openPreviewMessage(index, options = {}) {
     const page = await this.getActivePage();
+    const runOptions = normalizeRunOptions(options);
     const inboxUrl = options.inboxUrl || DEFAULT_INBOX_URL;
-    await this.ensureInboxPage(page, inboxUrl);
+    await this.ensureInboxPage(page, inboxUrl, runOptions);
     const preview = this.lastPreview.length ? this.lastPreview : (await this.preview(options)).messages;
     const message = preview[index];
 
@@ -581,7 +624,7 @@ class WorplMessageAutomation {
       throw new Error("선택한 미리보기 쪽지를 찾을 수 없습니다. 다시 미리보기를 실행하세요.");
     }
 
-    await this.clickMessage(page, message);
+    await this.clickMessage(page, message, runOptions);
     return message;
   }
 
@@ -601,13 +644,13 @@ class WorplMessageAutomation {
     return `${currentUrl}::${pageIndex}::${nextPage?.frameUrl || ""}::${nextPage?.href || ""}::${nextPage?.clickKey || ""}`;
   }
 
-  async gotoNextInboxPage(page, nextPage) {
+  async gotoNextInboxPage(page, nextPage, runOptions = normalizeRunOptions()) {
     if (!nextPage) {
       return false;
     }
 
     if (nextPage.href && !/^javascript:/i.test(nextPage.href)) {
-      await page.goto(nextPage.href, { waitUntil: "domcontentloaded", timeout: 10000 }).catch(() => {});
+      await page.goto(nextPage.href, { waitUntil: "domcontentloaded", timeout: this.navigationTimeoutMs(runOptions) }).catch(() => {});
       return true;
     }
 
@@ -631,7 +674,7 @@ class WorplMessageAutomation {
       .catch(() => false);
 
     if (clicked) {
-      await page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => {});
+      await page.waitForLoadState("domcontentloaded", { timeout: LOAD_STATE_TIMEOUT_MS }).catch(() => {});
       await page.waitForTimeout(500);
     }
 
@@ -643,16 +686,16 @@ class WorplMessageAutomation {
     const newPages = pagesAfterClick.filter((candidate) => !pagesBeforeClick.has(candidate));
 
     for (const newPage of newPages) {
-      await newPage.waitForLoadState("domcontentloaded", { timeout: 3000 }).catch(() => {});
+      await newPage.waitForLoadState("domcontentloaded", { timeout: QUICK_LOAD_STATE_TIMEOUT_MS }).catch(() => {});
       await newPage.close({ runBeforeUnload: true }).catch(() => {});
     }
   }
 
-  async clickMessage(page, message) {
-    await page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => {});
+  async clickMessage(page, message, runOptions = normalizeRunOptions()) {
+    await page.waitForLoadState("domcontentloaded", { timeout: LOAD_STATE_TIMEOUT_MS }).catch(() => {});
     if (message.pageUrl && page.url() !== message.pageUrl) {
-      await page.goto(message.pageUrl, { waitUntil: "domcontentloaded", timeout: 10000 }).catch(() => {});
-      await page.waitForLoadState("domcontentloaded", { timeout: 3000 }).catch(() => {});
+      await page.goto(message.pageUrl, { waitUntil: "domcontentloaded", timeout: this.navigationTimeoutMs(runOptions) }).catch(() => {});
+      await page.waitForLoadState("domcontentloaded", { timeout: QUICK_LOAD_STATE_TIMEOUT_MS }).catch(() => {});
     }
 
     const pagesBeforeClick = new Set(this.context.pages());
@@ -689,7 +732,7 @@ class WorplMessageAutomation {
       }, message)
       .catch(async (error) => {
         if (/Execution context was destroyed|navigation/i.test(error.message || "")) {
-          await page.waitForLoadState("domcontentloaded", { timeout: 3000 }).catch(() => {});
+          await page.waitForLoadState("domcontentloaded", { timeout: QUICK_LOAD_STATE_TIMEOUT_MS }).catch(() => {});
           return page.url() !== urlBeforeClick;
         }
         throw error;
@@ -699,14 +742,14 @@ class WorplMessageAutomation {
       throw new Error(`쪽지 링크를 찾을 수 없습니다: ${message.title}`);
     }
 
-    await page.waitForLoadState("domcontentloaded", { timeout: 3000 }).catch(() => {});
+    await page.waitForLoadState("domcontentloaded", { timeout: QUICK_LOAD_STATE_TIMEOUT_MS }).catch(() => {});
     await page.waitForTimeout(700);
     await this.closeNewPages(pagesBeforeClick);
-    await this.restoreInboxIfNeeded(page, urlBeforeClick);
+    await this.restoreInboxIfNeeded(page, urlBeforeClick, runOptions);
   }
 
-  async restoreInboxIfNeeded(page, urlBeforeClick) {
-    await page.waitForLoadState("domcontentloaded", { timeout: 3000 }).catch(() => {});
+  async restoreInboxIfNeeded(page, urlBeforeClick, runOptions = normalizeRunOptions()) {
+    await page.waitForLoadState("domcontentloaded", { timeout: QUICK_LOAD_STATE_TIMEOUT_MS }).catch(() => {});
 
     if (page.isClosed()) {
       throw new Error("받은쪽지함 Chrome 탭이 닫혔습니다. 다시 Chrome을 열고 미리보기부터 실행하세요.");
@@ -723,22 +766,26 @@ class WorplMessageAutomation {
         return;
       }
 
-      await page.goBack({ waitUntil: "domcontentloaded", timeout: 5000 }).catch(() => {});
-      await page.waitForLoadState("domcontentloaded", { timeout: 3000 }).catch(() => {});
+      await page.goBack({ waitUntil: "domcontentloaded", timeout: this.navigationTimeoutMs(runOptions) }).catch(() => {});
+      await page.waitForLoadState("domcontentloaded", { timeout: QUICK_LOAD_STATE_TIMEOUT_MS }).catch(() => {});
     }
   }
 
-  async ensureInboxPage(page, inboxUrl = DEFAULT_INBOX_URL) {
+  async ensureInboxPage(page, inboxUrl = DEFAULT_INBOX_URL, runOptions = normalizeRunOptions()) {
     if (page.isClosed()) {
       throw new Error("Chrome 탭이 닫혔습니다. Chrome을 다시 열어주세요.");
     }
 
     if (!/class=Message&action=inbox/i.test(page.url())) {
-      await page.goto(inboxUrl, { waitUntil: "domcontentloaded", timeout: 10000 });
+      await page.goto(inboxUrl, { waitUntil: "domcontentloaded", timeout: this.navigationTimeoutMs(runOptions) });
       return;
     }
 
-    await page.goto(inboxUrl, { waitUntil: "domcontentloaded", timeout: 10000 });
+    await page.goto(inboxUrl, { waitUntil: "domcontentloaded", timeout: this.navigationTimeoutMs(runOptions) });
+  }
+
+  navigationTimeoutMs(runOptions = normalizeRunOptions()) {
+    return runOptions.navigationTimeoutMs || NAVIGATION_TIMEOUT_MS;
   }
 
   messageKey(message) {

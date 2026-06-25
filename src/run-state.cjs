@@ -2,11 +2,14 @@ function normalizeRunOptions(options = {}) {
   const maxReads = clampNumber(options.maxReads, 20, 1, 1000);
   const checkpointEvery = clampNumber(options.checkpointEvery, 20, 1, 100);
   const maxScanPages = clampNumber(options.maxScanPages, 50, 1, 200);
+  const navigationTimeoutSeconds = clampNumber(options.navigationTimeoutSeconds, 500, 30, 600);
 
   return {
     maxReads,
     checkpointEvery,
-    maxScanPages
+    maxScanPages,
+    navigationTimeoutSeconds,
+    navigationTimeoutMs: navigationTimeoutSeconds * 1000
   };
 }
 

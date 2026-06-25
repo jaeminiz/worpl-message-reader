@@ -1,7 +1,7 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("worplReader", {
-  openChrome: (startUrl) => ipcRenderer.invoke("reader:openChrome", startUrl),
+  openChrome: (startUrl, options) => ipcRenderer.invoke("reader:openChrome", startUrl, options),
   preview: (options) => ipcRenderer.invoke("reader:preview", options),
   run: (options) => ipcRenderer.invoke("reader:run", options),
   pause: () => ipcRenderer.invoke("reader:pause"),

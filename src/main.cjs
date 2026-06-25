@@ -90,8 +90,8 @@ function getAutomation() {
   return automation;
 }
 
-ipcMain.handle("reader:openChrome", async (_event, startUrl) => {
-  return getAutomation().openChrome(startUrl || DEFAULT_INBOX_URL);
+ipcMain.handle("reader:openChrome", async (_event, startUrl, options) => {
+  return getAutomation().openChrome(startUrl || DEFAULT_INBOX_URL, options || {});
 });
 
 ipcMain.handle("reader:preview", async (_event, options) => {

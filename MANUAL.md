@@ -9,7 +9,7 @@
 ## 설치 방법
 
 1. 최신 설치 파일을 실행합니다.
-   - 예: `WORPL Message Reader Setup 0.1.13.exe`
+   - 예: `WORPL Message Reader Setup 0.1.18.exe`
 2. Windows 보안 경고가 표시되면 게시자를 확인한 뒤 실행을 선택합니다.
 3. 설치 위치를 선택하고 설치를 완료합니다.
 4. 바탕화면 또는 시작 메뉴의 `WORPL Message Reader` 바로가기로 실행합니다.
